@@ -1,0 +1,130 @@
+#loading necessary packages
+library("TCGAbiolinks")
+library("limma")
+library("edgeR")
+library("glmnet")
+library("SummarizedExperiment")
+library("RColorBrewer")
+
+#fetching an overview of the datset of interest
+TCGAbiolinks:::getProjectSummary("TCGA-LUSC")
+
+#creating query
+query_TCGA = GDCquery(
+  project = "TCGA-LUSC",
+  data.category = "Transcriptome Profiling",
+  experimental.strategy = "RNA-Seq",
+  data.type = "Gene Expression Quantification",
+  workflow.type = "STAR - Counts")
+
+#retrieving query
+GDCdownload(query = query_TCGA)
+tcga_data = GDCprepare(query_TCGA)
+
+#scrutinizing data
+dim(tcga_data)  #check dimension
+colnames(colData(tcga_data)) #check samples
+table(tcga_data@colData$definition) #Primary tumor/metastatic/recurrent/normal
+table(tcga_data@colData$tissue_or_organ_of_origin) #site of cancer origin
+table(tcga_data@colData$gender) #frequency per gender
+table(tcga_data@colData$race) #frequency per race
+
+
+#inspect count data
+dim(assay(tcga_data)) #dimension of count matrix
+head(rowData(tcga_data))   # ensembl id and gene id
+
+#saving
+saveRDS(object = tcga_data,
+        file = "tcga_data.RDS",
+        compress = FALSE)
+
+#for later use
+tcga_data = readRDS(file = "tcga_data.RDS")
+
+#Differential expression analysis
+limma_pipeline = function(
+    tcga_data,
+    condition_variable,
+    reference_group=NULL){
+  
+  design_factor = colData(tcga_data)[, condition_variable, drop=T]
+  
+  group = factor(design_factor)
+  if(!is.null(reference_group)){group = relevel(group, ref=reference_group)}
+  
+  design = model.matrix(~ group)
+  
+  dge = DGEList(counts=assay(tcga_data),
+                samples=colData(tcga_data),
+                genes=as.data.frame(rowData(tcga_data)))
+  
+  # filtering
+  keep = filterByExpr(dge,design)
+  dge = dge[keep,,keep.lib.sizes=FALSE]
+  rm(keep)
+  
+  dge = calcNormFactors(dge) #TMM normalization
+  v = voom(dge, design, plot=TRUE)  #VOOM normalization
+  
+  # Fit model to data
+  fit = lmFit(v, design)
+  fit = eBayes(fit)
+  
+  #fetching genes
+  topGenes = topTable(fit, coef=ncol(design), number=3000, p.value = 0.005, lfc = 2, sort.by="p")
+  #for all genes you can do: Genes = topTable(fit, coef=ncol(design), sort= 'none', n=Inf)
+  
+  return( list(
+      voomObj=v, # normalized data
+      fit=fit, # fitted model and statistics
+      topGenes=topGenes # the 100 most differentially expressed genes
+    ) ) }
+
+limma_res = limma_pipeline(
+  tcga_data=tcga_data,
+  condition_variable="definition",
+  reference_group="Solid Tissue Normal")
+
+#get results
+top_genes <-as.data.frame(limma_res[["topGenes"]])
+#for all genes: DEGS <- as.data.frame(limma_res[["Genes"]])
+
+#saving top genes and all genes for volcano plot
+write.csv(top_genes, "degs.csv")
+write.csv(DEGS, "dea.csv")
+
+#volcano plot of differentially expressed genes
+#loading libraries
+library(tidyr)
+library(ggplot2)
+
+
+df <- read.csv("dea.csv", header = TRUE)
+
+theme_set(theme_classic(base_size = 20) +
+            theme(
+              axis.title.y = element_text(face = "bold", margin = margin(0,20,0,0), size = rel(1.1), color = 'black'),
+              axis.title.x = element_text(hjust = 0.5, face = "bold", margin = margin(20,0,0,0), size = rel(1.1), color = 'black'),
+              plot.title = element_text(hjust = 0.5)
+            ))
+
+# Annotating the results as up and downregulated
+df$diffexpressed <- "NO"
+df$diffexpressed[df$logFC > 2 & df$adj.P.Val < 0.01] <- "UP"
+df$diffexpressed[df$logFC < -2 & df$adj.P.Val < 0.01] <- "DOWN"
+
+ggplot(data = df, aes(x = logFC, y = -log10(adj.P.Val), col = diffexpressed, xlab("log2FC"), ylab("p.adj"))) +
+  geom_vline(xintercept = c(-2, 2), col = "gray", linetype = 'solid') +
+  geom_hline(yintercept = -log10(0.05), col = "gray", linetype = 'solid') + 
+  geom_point(size = 1) +
+  scale_color_manual(values = c("#00009B", "grey", "#BB2323" ) ,
+                     labels= c("Downregulated", "Not significant", "Upregulated")) +
+  scale_x_continuous(breaks = seq(-10, 10,2)) + scale_y_continuous(breaks = seq(0,350,50))
+
+
+
+
+
+
+       
